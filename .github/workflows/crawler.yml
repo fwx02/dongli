@@ -2,7 +2,7 @@ name: Book Crawler
 
 on:
   schedule:
-    - cron: '30 14 * * *'  # 每天UTC时间14:30执行（北京时间22:30）
+    - cron: '50 14 * * *'  # 每天UTC时间14:30执行（北京时间22:30）
   workflow_dispatch:  # 允许手动触发
 
 jobs:
