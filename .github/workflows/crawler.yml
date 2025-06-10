@@ -2,7 +2,7 @@ name: Book Crawler
 
 on:
   schedule:
-    - cron: '30 10 * * *'  # 每天10:30执行（UTC时间）
+    - cron: '30 14 * * *'  # 每天UTC时间14:30执行（北京时间22:30）
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -25,6 +25,6 @@ jobs:
           
       - name: Run crawler
         env:
-          SCKEY: ${{ secrets.SCKEY }}  # 从GitHub Secrets获取SCKEY
+          SCKEY: ${{ secrets.SCKEY }}
         run: |
           python crawler.py
