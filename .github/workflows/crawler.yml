@@ -25,6 +25,6 @@ jobs:
           
       - name: Run crawler
         env:
-          SCKEY: ${{ secrets.SCKEY }}
+          WECHAT_WORK_WEBHOOK: ${{ secrets.WECHAT_WORK_WEBHOOK }}
         run: |
           python crawler.py
