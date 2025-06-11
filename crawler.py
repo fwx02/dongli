@@ -8,7 +8,7 @@ import os
 
 # 从环境变量获取企业微信Webhook
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
-KEYWORDS = ["敗北"]
+KEYWORDS = ["敗北","首刷"]
 
 def send_single_message(title, content):
     """发送单条企业微信消息"""
@@ -176,6 +176,9 @@ def main():
                         has_matched = True
                         logging.info(f"匹配到书籍: {title} (关键词: {keyword}, 出版月份: {publish_month})")
         
+        # 生成月份范围（避免引用未定义变量）
+        month_range = "、".join(sorted(publish_months)) if publish_months else "未知月份"
+        
         # 发送企业微信通知
         if matched_books:
             total_books = len(matched_books)
@@ -196,7 +199,6 @@ def main():
                     content += f"### {i}. {book['title']}\n"
                     content += f"- 关键词: `{book['keyword']}`\n\n"
             
-            month_range = "、".join(sorted(publish_months))
             notification_title = f"📚 {execute_time} 发现{total_books}本包含关键词的书籍 ({month_range})"
             
             # 发送通知（支持分段）
