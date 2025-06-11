@@ -8,7 +8,7 @@ import os
 
 # 从环境变量获取企业微信Webhook
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
-KEYWORDS = ["敗北","首刷"]
+KEYWORDS = ["敗北","全"]
 
 def send_single_message(title, content):
     """发送单条企业微信消息"""
