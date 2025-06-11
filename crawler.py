@@ -6,28 +6,40 @@ import time
 import datetime
 import os
 
-# 从环境变量获取SCKEY（GitHub Secrets配置）
-SCKEY = os.getenv("SCKEY")
+# 从环境变量获取企业微信Webhook
+WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 KEYWORDS = ["敗北"]
 
 def send_wechat_notification(title, content):
-    """发送微信通知"""
-    if not SCKEY:
-        logging.warning("未设置SCKEY，无法发送微信通知")
+    """发送企业微信机器人通知"""
+    if not WECHAT_WORK_WEBHOOK:
+        logging.warning("未设置企业微信Webhook，无法发送通知")
         return
     
-    url = f"https://sctapi.ftqq.com/{SCKEY}.send"
+    # 构建Markdown消息（支持富文本格式）
+    markdown_content = f"""
+# {title}
+
+{content}
+
+> 来自 GitHub Actions 爬虫任务
+"""
+    
+    # 发送POST请求到企业微信API
+    headers = {'Content-Type': 'application/json'}
     data = {
-        "title": title,
-        "desp": content
+        "msgtype": "markdown",
+        "markdown": {
+            "content": markdown_content
+        }
     }
     
     try:
-        response = requests.post(url, data=data, timeout=10)
+        response = requests.post(WECHAT_WORK_WEBHOOK, headers=headers, data=json.dumps(data), timeout=10)
         response.raise_for_status()
-        logging.info("微信通知发送成功")
+        logging.info("企业微信通知发送成功")
     except Exception as e:
-        logging.error(f"发送微信通知时出错: {str(e)}")
+        logging.error(f"发送企业微信通知时出错: {str(e)}")
 
 def get_book_titles(page_num):
     """获取指定页的书籍标题和出版时间"""
@@ -94,24 +106,32 @@ def main():
                         })
                         logging.info(f"匹配到书籍: {title} (关键词: {keyword}, 出版月份: {publish_month})")
         
-        # 发送微信通知
+        # 发送企业微信通知
         if matched_books:
             content = ""
             for i, book in enumerate(matched_books):
-                content += f"{i+1}. {book['title']} (关键词: {book['keyword']}, 出版月份: {book['publish_month']}, 检测时间: {book['execute_time']})\n\n"
+                content += f"### {i+1}. {book['title']}\n"
+                content += f"关键词: `{book['keyword']}`\n"
+                content += f"出版月份: `{book['publish_month']}`\n"
+                content += f"检测时间: `{book['execute_time']}`\n\n"
             
             month_range = "、".join(sorted(publish_months))
-            send_wechat_notification(f"{execute_time} 发现{len(matched_books)}本包含关键词的书籍 ({month_range})", content)
+            send_wechat_notification(f"📚 {execute_time} 发现{len(matched_books)}本包含关键词的书籍 ({month_range})", content)
             logging.info(f"成功发现{len(matched_books)}本匹配书籍并推送通知")
         else:
             month_range = "、".join(sorted(publish_months))
-            send_wechat_notification(f"{execute_time} 未发现匹配的书籍 ({month_range})", "今日未找到包含关键词的书籍。")
+            content = f"今日未找到包含关键词 `{'、'.join(KEYWORDS)}` 的书籍。\n\n"
+            content += f"📅 当前查询月份: {month_range}\n"
+            content += f"🕒 检测时间: {execute_time}\n"
+            send_wechat_notification(f"📚 {execute_time} 未发现匹配的书籍 ({month_range})", content)
             logging.info("未发现匹配的书籍")
             
     except Exception as e:
         logging.error(f"执行爬虫时发生错误: {str(e)}")
-        if SCKEY:
-            send_wechat_notification(f"爬虫执行失败", f"错误信息: {str(e)}")
+        if WECHAT_WORK_WEBHOOK:
+            error_content = f"错误信息: `{str(e)}`\n\n"
+            error_content += f"🕒 错误时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            send_wechat_notification(f"❌ 爬虫执行失败", error_content)
         raise  # 让GitHub Actions标记任务失败
 
 if __name__ == "__main__":
