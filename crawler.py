@@ -9,7 +9,6 @@ import sqlite3
 
 # 从环境变量获取企业微信Webhook
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
-KEYWORDS = ["敗北"]
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 
 def create_database():
@@ -300,32 +299,27 @@ def main():
             
             logging.info(f"第{page}页获取到{len(titles)}本书籍标题 ({publish_month})")
             
-            # 筛选包含关键词的书籍，并检查是否为新书
+            # 记录所有书籍（移除关键词过滤）
             for title in titles:
-                for keyword in KEYWORDS:
-                    # 转换为小写进行匹配（忽略大小写）
-                    if keyword.lower() in title.lower():
-                        book_info = {
+                book_info = {
+                    "title": title,
+                    "publish_month": publish_month
+                }
+                current_books.append(book_info)
+                
+                if not check_book_exists(title):
+                    # 新书：添加到数据库并记录
+                    if add_book(title, publish_month, today, today):
+                        new_books.append({
                             "title": title,
                             "publish_month": publish_month,
-                            "keyword": keyword
-                        }
-                        current_books.append(book_info)
-                        
-                        if not check_book_exists(title):
-                            # 新书：添加到数据库并记录
-                            if add_book(title, publish_month, today, today):
-                                new_books.append({
-                                    "title": title,
-                                    "keyword": keyword,
-                                    "publish_month": publish_month,
-                                    "first_seen": today
-                                })
-                                logging.info(f"发现新书: {title} (关键词: {keyword}, 出版月份: {publish_month})")
-                        else:
-                            # 已存在的书籍：更新last_seen
-                            update_book_last_seen(title, today)
-                            logging.info(f"已存在的书籍: {title}")
+                            "first_seen": today
+                        })
+                        logging.info(f"发现新书: {title} (出版月份: {publish_month})")
+                else:
+                    # 已存在的书籍：更新last_seen
+                    update_book_last_seen(title, today)
+                    logging.info(f"已存在的书籍: {title}")
         
         # 生成月份范围
         month_range = "、".join(sorted(publish_months)) if publish_months else "未知月份"
@@ -341,7 +335,7 @@ def main():
         # 添加新书信息
         if new_books:
             total_new_books = len(new_books)
-            notification_content += f"🎉 **今日发现 {total_new_books} 本新书** 🎉\n\n"
+            notification_content += f"🎉 **今日发现 {total_new_books} 本预定出书** 🎉\n\n"
             
             # 按月份分组
             books_by_month = {}
@@ -353,10 +347,9 @@ def main():
             
             # 按月份生成内容
             for month, books in books_by_month.items():
-                notification_content += f"## 📅 {month} 出版的新书\n\n"
+                notification_content += f"## 📅 {month} 预定出版的新书\n\n"
                 for i, book in enumerate(books, 1):
                     notification_content += f"### {i}. {book['title']}\n"
-                    notification_content += f"- 关键词: `{book['keyword']}`\n"
                     notification_content += f"- 首次发现: `{book['first_seen']}`\n\n"
         
         # 添加已出书信息
@@ -392,7 +385,7 @@ def main():
                 logging.error("推送更新通知失败")
         else:
             # 没有新书和已出书
-            content = f"今日没有发现包含关键词 `{'、'.join(KEYWORDS)}` 的新书，也没有书籍标记为已出版。\n\n"
+            content = f"今日没有发现新的预定出书，也没有书籍标记为已出版。\n\n"
             content += f"📅 当前查询月份: {month_range}\n"
             content += f"🕒 检测时间: {execute_time}\n"
             send_wechat_notification(f"📚 {execute_time} 无更新 ({month_range})", content)
