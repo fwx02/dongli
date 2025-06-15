@@ -23,10 +23,22 @@ jobs:
           pip install requests beautifulsoup4
       
       - name: 下载数据库文件（如果存在）
-        uses: actions/download-artifact@v4  # 更新到v4版本
+        uses: actions/download-artifact@v4
         with:
           name: database
           path: .
+        continue-on-error: true  # 允许下载失败并继续执行
+      
+      - name: 检查数据库文件是否存在
+        id: check-db
+        run: |
+          if [ -f "book_history.db" ]; then
+            echo "db_exists=true" >> $GITHUB_OUTPUT
+            echo "数据库文件存在，将使用现有数据"
+          else
+            echo "db_exists=false" >> $GITHUB_OUTPUT
+            echo "数据库文件不存在，将创建新数据库"
+          fi
       
       - name: 运行爬虫
         env:
@@ -36,13 +48,14 @@ jobs:
           python crawler.py
       
       - name: 上传数据库文件
-        uses: actions/upload-artifact@v4  # 更新到v4版本
+        uses: actions/upload-artifact@v4
         with:
           name: database
           path: book_history.db
+          retention-days: 30  # 保留30天，方便查看历史数据
       
       - name: 上传日志文件
-        uses: actions/upload-artifact@v4  # 更新到v4版本
+        uses: actions/upload-artifact@v4
         with:
           name: logs
           path: crawler.log
