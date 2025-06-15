@@ -11,7 +11,7 @@ import sqlite3
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
-MIN_INTERVAL_BETWEEN_MESSAGES = 60 * 10  # 消息之间的最小间隔（秒）
+MIN_INTERVAL_BETWEEN_MESSAGES = 60  # 消息之间的最小间隔（秒），修改为1分钟
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
 MAX_BOOKS_PER_SECTION = 50  # 每个分段最多包含的书籍数量
 
@@ -36,11 +36,11 @@ def create_database():
         logging.error(f"创建数据库时出错: {str(e)}")
 
 def check_book_exists(title):
-    """检查书籍是否已存在于数据库中"""
+    """检查书籍是否已存在于数据库中（无论是否已出版）"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM books WHERE title = ? AND is_published = 0", (title,))
+        cursor.execute("SELECT * FROM books WHERE title = ?", (title,))
         result = cursor.fetchone()
         conn.close()
         return result is not None
@@ -63,7 +63,7 @@ def add_book(title, publish_month, first_seen, last_seen):
         logging.info(f"新书已添加到数据库: {title}")
         return True
     except sqlite3.IntegrityError:
-        # 书籍已存在，更新last_seen
+        # 书籍已存在，更新last_seen（仅当书籍未被标记为已出版时）
         update_book_last_seen(title, last_seen)
         return False
     except Exception as e:
@@ -71,10 +71,11 @@ def add_book(title, publish_month, first_seen, last_seen):
         return False
 
 def update_book_last_seen(title, last_seen):
-    """更新书籍的最后一次出现时间"""
+    """更新书籍的最后一次出现时间（仅当书籍未被标记为已出版时）"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        # 只更新未出版的书籍
         cursor.execute(
             "UPDATE books SET last_seen = ? WHERE title = ? AND is_published = 0",
             (last_seen, title)
@@ -306,9 +307,16 @@ def get_book_titles(page_num):
             sample_titles = [element.get_text(strip=True) for element in book_elements[:3]]
             logging.info(f"示例标题: {sample_titles}")
         
+        # 处理书名，移除可能的行号前缀
+        processed_titles = []
+        for title in [element.get_text(strip=True) for element in book_elements]:
+            # 移除可能的行号前缀（如"1."、"1、"等）
+            processed_title = title.lstrip('0123456789.、 ')
+            processed_titles.append(processed_title)
+        
         return {
             "publish_month": publish_month,
-            "titles": [element.get_text(strip=True) for element in book_elements]
+            "titles": processed_titles
         }
     except Exception as e:
         logging.error(f"爬取第{page_num}页时出错: {str(e)}")
@@ -353,6 +361,7 @@ def main():
                 }
                 current_books.append(book_info)
                 
+                # 检查书籍是否已存在（无论是否已出版）
                 if not check_book_exists(title):
                     # 新书：添加到数据库并记录
                     if add_book(title, publish_month, today, today):
