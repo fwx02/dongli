@@ -63,10 +63,11 @@ def batch_add_books(books):
         
         for i, book in enumerate(books):
             try:
+                # 修复：正确的参数顺序和数量
                 cursor.execute(
                     """INSERT INTO books (title, publish_month, first_seen, last_seen, is_published) 
                        VALUES (?, ?, ?, ?, 0)""",
-                    (book["title"], book["publish_month"], book["first_seen"], book["last_seen"], 0)
+                    (book["title"], book["publish_month"], book["first_seen"], book["last_seen"])
                 )
                 added_count += 1
                 
@@ -98,7 +99,7 @@ def update_book_last_seen(title, last_seen):
         # 只更新未出版的书籍
         cursor.execute(
             "UPDATE books SET last_seen = ? WHERE title = ? AND is_published = 0",
-            (last_seen, last_seen, title)
+            (last_seen, title)
         )
         conn.commit()
         conn.close()
@@ -558,7 +559,7 @@ def main():
             notification_title = f"📚 {execute_time} 书籍更新 ({month_range})"
             
             # 发送合并后的通知（考虑API限制）
-            if send_wechat_notification(notification_title, notification_content):
+            if send_combined_message(notification_title, notification_content):
                 logging.info(f"成功推送合并后的更新通知: {len(new_books)}本预定出书, {len(published_books)}本已出书")
             else:
                 logging.error("推送合并后的更新通知失败")
@@ -567,14 +568,16 @@ def main():
             content = f"今日没有发现新的预定出书，也没有书籍标记为已出版。\n\n"
             content += f"📅 当前查询月份: {month_range}\n"
             content += f"🕒 检测时间: {execute_time}\n"
-            send_wechat_notification(f"📚 {execute_time} 无更新 ({month_range})", content)
+            # 发送合并后的通知
+            send_combined_message(f"📚 {execute_time} 无更新 ({month_range})", content)
             logging.info("今日无更新")
                 
     except Exception as e:
         logging.error(f"执行爬虫时发生错误: {str(e)}")
         error_content = f"错误信息: `{str(e)}`\n\n"
         error_content += f"🕒 错误时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        send_wechat_notification(f"❌ {execute_time} 爬虫执行失败", error_content)
+        # 发送合并后的通知
+        send_combined_message(f"❌ {execute_time} 爬虫执行失败", error_content)
         raise  # 让GitHub Actions标记任务失败
 
 if __name__ == "__main__":
