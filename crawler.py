@@ -11,7 +11,7 @@ import sqlite3
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
-MIN_INTERVAL_BETWEEN_MESSAGES = 60  # 消息之间的最小间隔（秒）
+MIN_INTERVAL_BETWEEN_MESSAGES = 3  # 消息之间的最小间隔（秒）
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
 MAX_MESSAGE_LENGTH = 3600  # 更保守的消息最大长度限制（留出496字节安全余量）
 MAX_BOOKS_PER_SECTION = 20  # 每个分段最多包含的书籍数量（进一步降低）
