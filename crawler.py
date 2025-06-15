@@ -13,6 +13,7 @@ DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
 MIN_INTERVAL_BETWEEN_MESSAGES = 60 * 10  # 消息之间的最小间隔（秒）
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
+MAX_BOOKS_PER_SECTION = 50  # 每个分段最多包含的书籍数量
 
 def create_database():
     """创建数据库表（如果不存在）"""
@@ -228,68 +229,52 @@ def send_wechat_notification(title, content):
     """发送企业微信机器人通知（合并所有内容，考虑API限制）"""
     # 企业微信Markdown消息最大长度限制（约4000字符）
     MAX_LENGTH = 3800
-    markdown_content = f"# {title}\n\n{content}\n\n> 来自 GitHub Actions 爬虫任务"
     
-    # 如果内容过长，分段发送（但尽量合并为一条）
-    if len(markdown_content) > MAX_LENGTH:
-        logging.info(f"消息长度 {len(markdown_content)} 超过限制，将分段发送")
-        
-        # 尝试智能分段，保持章节完整性
-        sections = []
-        current_section = ""
-        
-        # 按章节分割（假设内容中有##标记的章节）
-        chapter_sections = markdown_content.split("\n\n## ")
-        
-        for i, section in enumerate(chapter_sections):
-            if i == 0:  # 第一个部分（标题和引言）
-                current_section = section
-            else:
-                # 检查添加当前章节后是否会超过限制
-                if len(current_section) + len(section) + len("\n\n## ") < MAX_LENGTH:
-                    current_section += "\n\n## " + section
-                else:
-                    # 如果当前章节单独就超过限制，强制分割
-                    if len(section) > MAX_LENGTH:
-                        # 按子章节分割（假设内容中有###标记的子章节）
-                        sub_sections = section.split("\n\n### ")
-                        for j, sub_section in enumerate(sub_sections):
-                            if j == 0:  # 第一个子章节
-                                if len(current_section) + len(sub_section) + len("\n\n### ") < MAX_LENGTH:
-                                    current_section += "\n\n### " + sub_section
-                                else:
-                                    sections.append(current_section)
-                                    current_section = "## " + sub_section
-                            else:
-                                if len(current_section) + len(sub_section) + len("\n\n### ") < MAX_LENGTH:
-                                    current_section += "\n\n### " + sub_section
-                                else:
-                                    sections.append(current_section)
-                                    current_section = "## " + sub_section
-                    else:
-                        # 否则，将当前章节作为新的部分
-                        sections.append(current_section)
-                        current_section = "## " + section
-        
-        # 添加最后一个部分
-        if current_section:
-            sections.append(current_section)
-        
-        # 发送所有部分
-        success = True
-        for i, section in enumerate(sections):
-            if i == 0:
-                section_title = title
-            else:
-                section_title = f"{title} (续{i})"
+    # 智能分段算法 - 按月份和书籍数量双重控制
+    sections = []
+    current_section = ""
+    current_books_count = 0
+    
+    # 按月份分割内容
+    month_sections = content.split("\n\n## ")
+    
+    for i, section in enumerate(month_sections):
+        if i == 0:  # 第一个部分（标题和引言）
+            current_section = section
+        else:
+            section_content = "## " + section
             
-            if not send_combined_message(section_title, section):
-                success = False
+            # 计算当前部分的书籍数量
+            books_in_section = section.count("\n### ")
+            
+            # 如果添加当前部分会超过最大书籍数量，或者总长度超过限制
+            if (current_books_count + books_in_section > MAX_BOOKS_PER_SECTION) or \
+               (len(current_section) + len(section_content) > MAX_LENGTH):
+                # 保存当前部分并开始新的部分
+                sections.append(current_section)
+                current_section = section_content
+                current_books_count = books_in_section
+            else:
+                # 继续添加到当前部分
+                current_section += "\n\n" + section_content
+                current_books_count += books_in_section
+    
+    # 添加最后一个部分
+    if current_section:
+        sections.append(current_section)
+    
+    # 发送所有部分
+    success = True
+    for i, section in enumerate(sections):
+        if i == 0:
+            section_title = title
+        else:
+            section_title = f"{title} (续{i})"
         
-        return success
-    else:
-        # 内容未超过限制，直接发送
-        return send_combined_message(title, markdown_content)
+        if not send_combined_message(section_title, section):
+            success = False
+    
+    return success
 
 def get_book_titles(page_num):
     """获取指定页的书籍标题和出版时间"""
