@@ -23,7 +23,7 @@ jobs:
           pip install requests beautifulsoup4
       
       - name: 下载数据库文件（如果存在）
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4  # 更新到v4版本
         with:
           name: database
           path: .
@@ -36,13 +36,13 @@ jobs:
           python crawler.py
       
       - name: 上传数据库文件
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4  # 更新到v4版本
         with:
           name: database
           path: book_history.db
       
       - name: 上传日志文件
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4  # 更新到v4版本
         with:
           name: logs
           path: crawler.log
