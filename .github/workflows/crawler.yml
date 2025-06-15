@@ -2,7 +2,7 @@ name: 书籍爬虫
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # 每天UTC时间4点（北京时间12点）运行
+    - cron: '0 4 * * *'  # 每天UTC时4点（北京时12点）运行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -11,41 +11,32 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-      
+
       - name: 设置Python环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-      
+
       - name: 显示环境信息
         run: |
           echo "工作目录: $(pwd)"
           echo "Python版本: $(python --version)"
           echo "环境变量:"
           env
-      
+
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
-          pip list  # 显示已安装的包
-      
+          pip list
+
       - name: 下载数据库文件（如果存在）
         uses: actions/download-artifact@v4
         with:
           name: database
           path: .
-        continue-on-error: true  # 允许下载失败
-        id: download-db
-      
-      - name: 检查下载结果
-        run: |
-          if ${{ steps.download-db.outcome == 'success' }}; then
-            echo "✅ 数据库文件下载成功"
-          else
-            echo "⚠️ 未找到数据库文件，将创建新数据库"
-          fi
-      
+        continue-on-error: true
+
       - name: 检查数据库文件状态
         id: check-db
         run: |
@@ -57,7 +48,7 @@ jobs:
             echo "db_exists=false" >> $GITHUB_OUTPUT
             echo "⚠️ 未找到数据库文件，将创建新数据库"
           fi
-      
+
       - name: 运行爬虫
         env:
           WECHAT_WORK_WEBHOOK: ${{ secrets.WECHAT_WORK_WEBHOOK }}
@@ -65,36 +56,36 @@ jobs:
         run: |
           echo "开始运行爬虫..."
           python crawler.py
-        continue-on-error: false  # 若爬虫运行失败，终止工作流
-      
+
       - name: 验证数据库结果
-        if: always()  # 无论前面步骤是否成功都执行
+        if: always()
         run: |
           echo "检查数据库内容..."
           if [ -f "book_history.db" ]; then
             echo "数据库文件存在，查看表结构:"
             sqlite3 book_history.db ".schema books"
-            
+
             echo "查看书籍数量:"
             sqlite3 book_history.db "SELECT COUNT(*) FROM books;"
-            
-            # 修正查询字段，原有的crawl_count字段在代码中未定义，这里改为last_seen
+
             echo "查看最近添加的书籍:"
-            sqlite3 book_history.db "SELECT title, publish_month, first_seen, last_seen FROM books ORDER BY first_seen DESC LIMIT 5;"
+            sqlite3 book_history.db "SELECT title, publish_month, first_seen, crawl_count FROM books ORDER BY first_seen DESC LIMIT 5;"
           else
             echo "❌ 数据库文件不存在!"
             exit 1
           fi
-      
+
       - name: 上传数据库文件
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: database
           path: book_history.db
           retention-days: 30
           if-no-files-found: error
-      
+
       - name: 上传日志文件
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs
