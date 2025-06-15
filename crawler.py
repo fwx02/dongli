@@ -5,10 +5,143 @@ import logging
 import time
 import datetime
 import os
+import sqlite3
 
 # 从环境变量获取企业微信Webhook
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 KEYWORDS = ["敗北"]
+DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
+
+def create_database():
+    """创建数据库表（如果不存在）"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS books (
+                title TEXT PRIMARY KEY,
+                publish_month TEXT,
+                first_seen TEXT,
+                last_seen TEXT,
+                is_published INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logging.info("数据库初始化完成")
+    except Exception as e:
+        logging.error(f"创建数据库时出错: {str(e)}")
+
+def check_book_exists(title):
+    """检查书籍是否已存在于数据库中"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM books WHERE title = ? AND is_published = 0", (title,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        logging.error(f"检查书籍时出错: {str(e)}")
+        return False
+
+def add_book(title, publish_month, first_seen, last_seen):
+    """将新书添加到数据库"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO books (title, publish_month, first_seen, last_seen, is_published) 
+               VALUES (?, ?, ?, ?, 0)""",
+            (title, publish_month, first_seen, last_seen)
+        )
+        conn.commit()
+        conn.close()
+        logging.info(f"新书已添加到数据库: {title}")
+        return True
+    except sqlite3.IntegrityError:
+        # 书籍已存在，更新last_seen
+        update_book_last_seen(title, last_seen)
+        return False
+    except Exception as e:
+        logging.error(f"添加书籍时出错: {str(e)}")
+        return False
+
+def update_book_last_seen(title, last_seen):
+    """更新书籍的最后一次出现时间"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE books SET last_seen = ? WHERE title = ? AND is_published = 0",
+            (last_seen, title)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"更新书籍last_seen时出错: {str(e)}")
+
+def mark_book_as_published(title, publish_date=None):
+    """标记书籍为已出书"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        # 如果提供了出版日期，更新publish_month
+        if publish_date:
+            cursor.execute(
+                "UPDATE books SET is_published = 1, publish_month = ? WHERE title = ?",
+                (publish_date, title)
+            )
+        else:
+            cursor.execute(
+                "UPDATE books SET is_published = 1 WHERE title = ?",
+                (title,)
+            )
+        conn.commit()
+        conn.close()
+        logging.info(f"书籍已标记为已出书: {title}")
+        return True
+    except Exception as e:
+        logging.error(f"标记书籍为已出书时出错: {str(e)}")
+        return False
+
+def get_unpublished_books():
+    """获取所有未出书的书籍"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title, publish_month, first_seen, last_seen FROM books WHERE is_published = 0")
+        result = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "title": row[0],
+                "publish_month": row[1],
+                "first_seen": row[2],
+                "last_seen": row[3]
+            }
+            for row in result
+        ]
+    except Exception as e:
+        logging.error(f"获取未出书书籍时出错: {str(e)}")
+        return []
+
+def check_and_mark_published_books(current_books):
+    """检查并标记已出书的书籍"""
+    try:
+        current_titles = [book["title"] for book in current_books]
+        unpublished_books = get_unpublished_books()
+        
+        published_books = []
+        for book in unpublished_books:
+            if book["title"] not in current_titles:
+                if mark_book_as_published(book["title"]):
+                    published_books.append(book)
+        
+        return published_books
+    except Exception as e:
+        logging.error(f"检查并标记已出书书籍时出错: {str(e)}")
+        return []
 
 def send_single_message(title, content):
     """发送单条企业微信消息"""
@@ -143,17 +276,22 @@ def main():
     """主函数（直接执行，无需云函数入口）"""
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        matched_books = []
+        new_books = []  # 存储新发现的书籍
+        published_books = []  # 存储已出书的书籍
         publish_months = set()
-        has_matched = False
         
         # 记录执行时间（转换为北京时间 UTC+8）
         utc_time = datetime.datetime.utcnow()
         beijing_time = utc_time + datetime.timedelta(hours=8)
         execute_time = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
+        today = beijing_time.strftime("%Y-%m-%d")
         logging.info(f"定时任务执行时间: {execute_time} (北京时间)")
         
+        # 初始化数据库
+        create_database()
+        
         # 爬取三页数据
+        current_books = []
         for page in range(1, 4):
             result = get_book_titles(page)
             titles = result["titles"]
@@ -162,31 +300,52 @@ def main():
             
             logging.info(f"第{page}页获取到{len(titles)}本书籍标题 ({publish_month})")
             
-            # 筛选包含关键词的书籍
+            # 筛选包含关键词的书籍，并检查是否为新书
             for title in titles:
                 for keyword in KEYWORDS:
                     # 转换为小写进行匹配（忽略大小写）
                     if keyword.lower() in title.lower():
-                        matched_books.append({
+                        book_info = {
                             "title": title,
-                            "keyword": keyword,
                             "publish_month": publish_month,
-                            "execute_time": execute_time
-                        })
-                        has_matched = True
-                        logging.info(f"匹配到书籍: {title} (关键词: {keyword}, 出版月份: {publish_month})")
+                            "keyword": keyword
+                        }
+                        current_books.append(book_info)
+                        
+                        if not check_book_exists(title):
+                            # 新书：添加到数据库并记录
+                            if add_book(title, publish_month, today, today):
+                                new_books.append({
+                                    "title": title,
+                                    "keyword": keyword,
+                                    "publish_month": publish_month,
+                                    "first_seen": today
+                                })
+                                logging.info(f"发现新书: {title} (关键词: {keyword}, 出版月份: {publish_month})")
+                        else:
+                            # 已存在的书籍：更新last_seen
+                            update_book_last_seen(title, today)
+                            logging.info(f"已存在的书籍: {title}")
         
-        # 生成月份范围（避免引用未定义变量）
+        # 生成月份范围
         month_range = "、".join(sorted(publish_months)) if publish_months else "未知月份"
         
+        # 每天检查并标记已出书的书籍
+        logging.info("执行每日已出书书籍检查")
+        published_books = check_and_mark_published_books(current_books)
+        logging.info(f"共发现{len(published_books)}本已出书的书籍")
+        
         # 发送企业微信通知
-        if matched_books:
-            total_books = len(matched_books)
-            content = ""
+        notification_content = ""
+        
+        # 添加新书信息
+        if new_books:
+            total_new_books = len(new_books)
+            notification_content += f"🎉 **今日发现 {total_new_books} 本新书** 🎉\n\n"
             
             # 按月份分组
             books_by_month = {}
-            for book in matched_books:
+            for book in new_books:
                 month = book['publish_month']
                 if month not in books_by_month:
                     books_by_month[month] = []
@@ -194,37 +353,50 @@ def main():
             
             # 按月份生成内容
             for month, books in books_by_month.items():
-                content += f"## 📅 {month} 出版的匹配书籍\n\n"
+                notification_content += f"## 📅 {month} 出版的新书\n\n"
                 for i, book in enumerate(books, 1):
-                    content += f"### {i}. {book['title']}\n"
-                    content += f"- 关键词: `{book['keyword']}`\n\n"
+                    notification_content += f"### {i}. {book['title']}\n"
+                    notification_content += f"- 关键词: `{book['keyword']}`\n"
+                    notification_content += f"- 首次发现: `{book['first_seen']}`\n\n"
+        
+        # 添加已出书信息
+        if published_books:
+            total_published_books = len(published_books)
+            notification_content += f"📦 **今日有 {total_published_books} 本书已出版** 📦\n\n"
             
-            notification_title = f"📚 {execute_time} 发现{total_books}本包含关键词的书籍 ({month_range})"
+            # 按月份分组
+            published_by_month = {}
+            for book in published_books:
+                month = book['publish_month']
+                if month not in published_by_month:
+                    published_by_month[month] = []
+                published_by_month[month].append(book)
+            
+            # 按月份生成内容
+            for month, books in published_by_month.items():
+                notification_content += f"## 📅 {month} 已出版的书籍\n\n"
+                for i, book in enumerate(books, 1):
+                    notification_content += f"### {i}. {book['title']}\n"
+                    notification_content += f"- 首次出现: `{book['first_seen']}`\n"
+                    notification_content += f"- 最后出现: `{book['last_seen']}`\n"
+                    notification_content += f"- 状态: ✅ **已出版**\n\n"
+        
+        # 如果有新书或已出书，发送综合通知
+        if new_books or published_books:
+            notification_title = f"📚 {execute_time} 书籍更新 ({month_range})"
             
             # 发送通知（支持分段）
-            if send_wechat_notification(notification_title, content):
-                logging.info(f"成功发现{total_books}本匹配书籍并推送通知")
+            if send_wechat_notification(notification_title, notification_content):
+                logging.info(f"成功推送更新通知: {len(new_books)}本新书, {len(published_books)}本已出书")
             else:
-                logging.error("推送通知失败")
-                
+                logging.error("推送更新通知失败")
         else:
-            # 未匹配到书籍
-            if not has_matched and len(publish_months) > 0:
-                # 未匹配到书籍，但爬取成功
-                content = f"今日未找到包含关键词 `{'、'.join(KEYWORDS)}` 的书籍。\n\n"
-                content += f"📅 当前查询月份: {month_range}\n"
-                content += f"🕒 检测时间: {execute_time}\n"
-                send_wechat_notification(f"📚 {execute_time} 未发现匹配的书籍 ({month_range})", content)
-                logging.info("未发现匹配的书籍")
-            else:
-                # 爬取出错或无数据
-                error_content = f"可能原因:\n"
-                error_content += f"1. 关键词 `{'、'.join(KEYWORDS)}` 不存在\n"
-                error_content += f"2. 网站结构变化导致爬取失败\n"
-                error_content += f"3. 网络请求超时\n\n"
-                error_content += f"🕒 检测时间: {execute_time}\n"
-                send_wechat_notification(f"⚠️ {execute_time} 爬虫执行异常", error_content)
-                logging.warning("未获取到有效数据或爬取失败")
+            # 没有新书和已出书
+            content = f"今日没有发现包含关键词 `{'、'.join(KEYWORDS)}` 的新书，也没有书籍标记为已出版。\n\n"
+            content += f"📅 当前查询月份: {month_range}\n"
+            content += f"🕒 检测时间: {execute_time}\n"
+            send_wechat_notification(f"📚 {execute_time} 无更新 ({month_range})", content)
+            logging.info("今日无更新")
                 
     except Exception as e:
         logging.error(f"执行爬虫时发生错误: {str(e)}")
