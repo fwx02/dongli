@@ -96,24 +96,8 @@ def create_database():
         logging.error(f"创建数据库时出错: {str(e)}")
         raise
 
-def check_book_exists(title):
-    """检查书籍是否已存在于数据库中"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM books WHERE title = ?", (title,))
-        result = cursor.fetchone()
-        conn.close()
-        
-        exists = "存在" if result else "不存在"
-        logging.debug(f"检查书籍 '{title}': {exists}")
-        return result is not None
-    except Exception as e:
-        logging.error(f"检查书籍时出错: {str(e)}")
-        return False
-
 def batch_add_books(books):
-    """批量添加书籍到数据库"""
+    """批量添加书籍到数据库，优化重复检查逻辑"""
     if not books:
         logging.info("没有新书需要添加")
         return 0
@@ -127,21 +111,23 @@ def batch_add_books(books):
             normalized_title = normalize_title(book["title"])
             logging.debug(f"处理书籍 #{i+1}/{len(books)}: '{normalized_title}'")
             
-            if not check_book_exists(normalized_title):
-                try:
-                    cursor.execute(
-                        """INSERT INTO books (title, publish_month, first_seen, last_seen, is_published) 
-                           VALUES (?, ?, ?, ?, 0)""",
-                        (normalized_title, book["publish_month"], book["first_seen"], book["last_seen"])
-                    )
+            # 使用更安全的方式检查并插入
+            try:
+                # 尝试插入，如果存在则忽略
+                cursor.execute(
+                    """INSERT OR IGNORE INTO books (title, publish_month, first_seen, last_seen, is_published) 
+                       VALUES (?, ?, ?, ?, 0)""",
+                    (normalized_title, book["publish_month"], book["first_seen"], book["last_seen"])
+                )
+                
+                # 检查是否插入成功
+                if cursor.rowcount > 0:
                     new_count += 1
                     logging.info(f"✅ 新书入库: '{normalized_title}' ({book['publish_month']})")
-                except sqlite3.IntegrityError as e:
-                    logging.warning(f"⚠️ 书籍已存在或违反唯一约束: '{normalized_title}', 错误: {str(e)}")
-                except Exception as e:
-                    logging.error(f"❌ 添加书籍失败: '{normalized_title}', 错误: {str(e)}")
-            else:
-                logging.info(f"📚 书籍已存在: '{normalized_title}'")
+                else:
+                    logging.info(f"📚 书籍已存在: '{normalized_title}'")
+            except Exception as e:
+                logging.error(f"❌ 添加书籍失败: '{normalized_title}', 错误: {str(e)}")
             
             if (i + 1) % DB_COMMIT_BATCH_SIZE == 0:
                 conn.commit()
@@ -289,7 +275,7 @@ def send_combined_message(title, content):
     if json_length > 4096:
         logging.warning(f"完整JSON请求长度 {json_length} 超过企业微信限制 4096 字节")
         
-        # 尝试智能分段
+        # 使用更智能的分段
         sections = split_message_smart(content)
         success = True
         
@@ -306,13 +292,6 @@ def send_combined_message(title, content):
             section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
             
             logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，长度 {section_length} 字节")
-            
-            if section_length > 4096:
-                logging.error(f"分段 {i+1} 长度 {section_length} 仍然超过限制，尝试截断")
-                section = truncate_message(section)
-                section_data["markdown"]["content"] = section
-                section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
-                logging.info(f"截断后分段 {i+1} 长度为 {section_length} 字节")
             
             try:
                 response = requests.post(
@@ -365,8 +344,8 @@ def send_combined_message(title, content):
             return False
 
 def split_message_smart(content):
-    """智能分割长消息，保持内容完整性"""
-    if len(content) <= MAX_MESSAGE_LENGTH:
+    """更智能地分割长消息，确保每段都不超过企业微信限制"""
+    if len(content) <= 4000:  # 预留一些安全空间
         return [content]
     
     sections = []
@@ -374,17 +353,23 @@ def split_message_smart(content):
     lines = content.split('\n')
     
     for line in lines:
-        # 如果添加当前行后超过最大长度，则创建新的分段
-        if len(current_section) + len(line) + 1 > MAX_MESSAGE_LENGTH:
-            # 如果当前分段为空，强制添加此行（可能会超过限制，但这是极端情况）
-            if not current_section:
-                sections.append(line)
-                current_section = ""
-            else:
+        # 计算添加此行后的长度（包括换行符）
+        line_length = len(line) + 1
+        
+        # 如果是标题行，并且添加后会超过限制，则开始新的分段
+        if line.startswith('#') and len(current_section) + line_length > 4000:
+            if current_section:  # 如果当前分段不为空，则添加到结果
                 sections.append(current_section)
                 current_section = line
+            else:  # 如果当前分段为空，但标题太长，强制添加
+                sections.append(line)
+                current_section = ""
+        # 如果不是标题行，但添加后会超过限制，则开始新的分段
+        elif len(current_section) + line_length > 4000:
+            sections.append(current_section)
+            current_section = line
+        # 否则添加到当前分段
         else:
-            # 添加当前行到当前分段
             if current_section:
                 current_section += '\n' + line
             else:
@@ -394,28 +379,53 @@ def split_message_smart(content):
     if current_section:
         sections.append(current_section)
     
+    # 验证每个分段的长度
+    for i, section in enumerate(sections):
+        section_length = len(section.encode('utf-8'))
+        logging.debug(f"分段 {i+1}/{len(sections)} 长度: {section_length} 字节")
+        
+        # 如果分段仍然超过限制，进行截断
+        if section_length > 4000:
+            sections[i] = truncate_message(section)
+            logging.warning(f"分段 {i+1} 超过限制，已截断")
+    
     return sections
 
 def truncate_message(content):
-    """截断消息内容，确保不超过最大长度"""
-    if len(content) <= MAX_MESSAGE_LENGTH:
+    """更安全地截断消息内容，确保不超过最大长度"""
+    encoded = content.encode('utf-8')
+    
+    if len(encoded) <= 4000:
         return content
     
-    # 尝试在最后一个完整的项目符号或标题处截断
-    markers = ['\n- ', '\n* ', '\n# ', '\n## ', '\n### ']
+    # 尝试在最近的标题或项目符号处截断
+    markers = ['\n# ', '\n## ', '\n### ', '\n- ', '\n* ']
     truncate_index = -1
     
-    for marker in markers:
-        index = content.rfind(marker, 0, MAX_MESSAGE_LENGTH)
-        if index > truncate_index:
-            truncate_index = index
+    # 从4000字节往前查找最近的标记
+    max_bytes = 4000 - 10  # 预留一些空间
+    for i in range(max_bytes, 0, -1):
+        try:
+            # 检查当前位置是否是标记的开始
+            substr = encoded[i:i+4].decode('utf-8')
+            for marker in markers:
+                if substr.startswith(marker):
+                    truncate_index = i
+                    break
+            
+            if truncate_index != -1:
+                break
+        except UnicodeDecodeError:
+            continue
     
     if truncate_index > 0:
-        # 在标记后添加省略号
-        return content[:truncate_index] + "\n...（消息过长，已截断）"
+        # 解码截断后的内容
+        truncated = encoded[:truncate_index].decode('utf-8', errors='ignore')
+        return truncated + "\n...（消息过长，已分段）"
     else:
         # 没有找到合适的截断点，直接截断
-        return content[:MAX_MESSAGE_LENGTH - 10] + "...（消息过长，已截断）"
+        truncated = encoded[:max_bytes].decode('utf-8', errors='ignore')
+        return truncated + "...（消息过长，已截断）"
 
 def get_last_message_time():
     """获取上次发送消息的时间"""
