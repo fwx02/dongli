@@ -11,10 +11,10 @@ import sqlite3
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
-MIN_INTERVAL_BETWEEN_MESSAGES = 3  # 消息之间的最小间隔（秒）
+MIN_INTERVAL_BETWEEN_MESSAGES = 60  # 消息之间的最小间隔（秒）
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
-MAX_BOOKS_PER_SECTION = 50  # 每个分段最多包含的书籍数量
-MAX_MESSAGE_LENGTH = 3800  # 企业微信消息最大长度（留出296字节安全余量）
+MAX_MESSAGE_LENGTH = 3600  # 更保守的消息最大长度限制（留出496字节安全余量）
+MAX_BOOKS_PER_SECTION = 20  # 每个分段最多包含的书籍数量（进一步降低）
 
 def create_database():
     """创建数据库表（如果不存在）"""
@@ -183,35 +183,49 @@ def send_combined_message(title, content):
         logging.info(f"距离上次发送消息时间不足，等待 {wait_time:.0f} 秒")
         time.sleep(wait_time)
     
-    headers = {'Content-Type': 'application/json'}
+    # 构建完整的请求JSON并计算其字节长度
     data = {
         "msgtype": "markdown",
         "markdown": {
             "content": content
         }
     }
+    json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+    json_length = len(json_data)
     
-    # 检查消息长度是否超过限制
-    content_length = len(content.encode('utf-8'))
-    if content_length > MAX_MESSAGE_LENGTH:
-        logging.warning(f"消息长度 {content_length} 超过限制 {MAX_MESSAGE_LENGTH}，将进行截断")
-        # 尝试截断内容（保留开头和结尾的关键信息）
-        truncated_content = content[:MAX_MESSAGE_LENGTH - 200] + "\n\n...（消息过长，已截断）"
+    # 检查JSON序列化后的总长度
+    if json_length > 4096:
+        logging.warning(f"完整JSON请求长度 {json_length} 超过企业微信限制 4096 字节")
+        
+        # 估算内容部分可以容纳的长度
+        estimated_content_length = 4096 - (json_length - len(content.encode('utf-8'))) - 100
+        if estimated_content_length < 1000:  # 设置一个合理的最小值
+            estimated_content_length = 1000
+        
+        logging.info(f"估算内容最大长度为 {estimated_content_length} 字节")
+        
+        # 截断内容并添加提示
+        truncated_content = content.encode('utf-8')[:estimated_content_length].decode('utf-8', 'ignore')
+        truncated_content = truncated_content.rsplit('\n', 1)[0]  # 确保在完整的一行结束
+        truncated_content += "\n\n...（内容过长，已自动截断）"
+        
+        # 重新构建并检查
         data["markdown"]["content"] = truncated_content
-        logging.info(f"已将消息截断为 {len(truncated_content.encode('utf-8'))} 字节")
+        json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        logging.info(f"截断后JSON请求长度为 {len(json_data)} 字节")
     
     try:
         # 重试机制
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = requests.post(WECHAT_WORK_WEBHOOK, headers=headers, 
-                                        data=json.dumps(data), timeout=15)
+                response = requests.post(WECHAT_WORK_WEBHOOK, headers={'Content-Type': 'application/json'}, 
+                                        data=json_data, timeout=15)
                 response.raise_for_status()
                 
                 result = response.json()
                 if result.get("errcode") == 0:
-                    logging.info(f"企业微信通知发送成功: {title}")
+                    logging.info(f"企业微信通知发送成功: {title}，长度 {len(json_data)} 字节")
                     save_last_message_time()  # 保存发送时间
                     return True
                 else:
@@ -238,7 +252,7 @@ def send_combined_message(title, content):
 
 def send_wechat_notification(title, content):
     """发送企业微信机器人通知（合并所有内容，考虑API限制）"""
-    # 智能分段算法 - 基于字节长度精确控制
+    # 智能分段算法 - 基于JSON序列化后的实际长度控制
     sections = []
     current_section = ""
     
@@ -251,11 +265,17 @@ def send_wechat_notification(title, content):
         else:
             section_content = "## " + section
             
-            # 计算添加新部分后的总长度（使用UTF-8编码计算字节长度）
-            combined_length = len((current_section + "\n\n" + section_content).encode('utf-8'))
+            # 计算添加新部分后的完整JSON长度
+            test_data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": current_section + "\n\n" + section_content
+                }
+            }
+            test_length = len(json.dumps(test_data, ensure_ascii=False).encode('utf-8'))
             
             # 如果添加当前部分会超过最大长度限制
-            if combined_length > MAX_MESSAGE_LENGTH:
+            if test_length > 4096:
                 # 保存当前部分并开始新的部分
                 sections.append(current_section)
                 current_section = section_content
@@ -275,9 +295,15 @@ def send_wechat_notification(title, content):
         else:
             section_title = f"{title} (续{i})"
         
-        # 记录每个分段的长度
-        section_length = len(section.encode('utf-8'))
-        logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，长度 {section_length} 字节")
+        # 记录每个分段的JSON长度
+        section_data = {
+            "msgtype": "markdown",
+            "markdown": {
+                "content": section
+            }
+        }
+        section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
+        logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，JSON长度 {section_length} 字节")
         
         if not send_combined_message(section_title, section):
             success = False
