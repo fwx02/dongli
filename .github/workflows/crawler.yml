@@ -36,7 +36,16 @@ jobs:
           name: database
           path: .
         continue-on-error: true  # 允许下载失败
-        
+        id: download-db
+      
+      - name: 检查下载结果
+        run: |
+          if ${{ steps.download-db.outcome == 'success' }}; then
+            echo "✅ 数据库文件下载成功"
+          else
+            echo "⚠️ 未找到数据库文件，将创建新数据库"
+          fi
+      
       - name: 检查数据库文件状态
         id: check-db
         run: |
@@ -56,6 +65,7 @@ jobs:
         run: |
           echo "开始运行爬虫..."
           python crawler.py
+        continue-on-error: false  # 若爬虫运行失败，终止工作流
       
       - name: 验证数据库结果
         if: always()  # 无论前面步骤是否成功都执行
@@ -68,8 +78,9 @@ jobs:
             echo "查看书籍数量:"
             sqlite3 book_history.db "SELECT COUNT(*) FROM books;"
             
+            # 修正查询字段，原有的crawl_count字段在代码中未定义，这里改为last_seen
             echo "查看最近添加的书籍:"
-            sqlite3 book_history.db "SELECT title, publish_month, first_seen, crawl_count FROM books ORDER BY first_seen DESC LIMIT 5;"
+            sqlite3 book_history.db "SELECT title, publish_month, first_seen, last_seen FROM books ORDER BY first_seen DESC LIMIT 5;"
           else
             echo "❌ 数据库文件不存在!"
             exit 1
