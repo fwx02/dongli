@@ -14,9 +14,9 @@ DB_FILE = os.path.join(DB_DIR, "book_history.db")
 LOG_FILE = os.path.join(DB_DIR, "crawler.log")
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 MAX_MESSAGE_LENGTH = 3500
-MAX_BOOKS_PER_BATCH = 15
+MAX_BOOKS_PER_BATCH = 5
 DB_COMMIT_BATCH_SIZE = 10
-MIN_INTERVAL_BETWEEN_MESSAGES = 60
+MIN_INTERVAL_BETWEEN_MESSAGES = 3
 LAST_MESSAGE_TIME_FILE = os.path.join(DB_DIR, "last_message_time.txt")
 
 def setup_logging():
