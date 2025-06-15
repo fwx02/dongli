@@ -2,7 +2,7 @@ name: 书籍爬虫
 
 on:
   schedule:
-    - cron: '0 11 * * *'  # 每天UTC时间4点（北京时间12点）运行
+    - cron: '0 4 * * *'  # 每天UTC时间4点（北京时间12点）运行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -22,22 +22,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
       
-      - name: 下载数据库文件（如果存在）
+      - name: 尝试下载数据库文件
+        id: download-db
         uses: actions/download-artifact@v4
         with:
           name: database
           path: .
-        continue-on-error: true  # 允许下载失败并继续执行
+        continue-on-error: true  # 允许下载失败
       
-      - name: 检查数据库文件是否存在
+      - name: 检查数据库文件状态
         id: check-db
         run: |
           if [ -f "book_history.db" ]; then
             echo "db_exists=true" >> $GITHUB_OUTPUT
-            echo "数据库文件存在，将使用现有数据"
+            echo "✅ 找到现有数据库文件"
+            ls -lh book_history.db
           else
             echo "db_exists=false" >> $GITHUB_OUTPUT
-            echo "数据库文件不存在，将创建新数据库"
+            echo "⚠️ 未找到数据库文件，将创建新数据库"
           fi
       
       - name: 运行爬虫
@@ -45,14 +47,29 @@ jobs:
           WECHAT_WORK_WEBHOOK: ${{ secrets.WECHAT_WORK_WEBHOOK }}
           DB_DIR: .
         run: |
+          echo "开始运行爬虫..."
           python crawler.py
+      
+      - name: 验证数据库结果
+        run: |
+          if [ -f "book_history.db" ]; then
+            echo "✅ 数据库文件存在"
+            ls -lh book_history.db
+            # 可选：显示数据库中的记录数
+            echo "数据库记录数:"
+            sqlite3 book_history.db "SELECT COUNT(*) FROM books;"
+          else
+            echo "❌ 数据库文件未生成，爬虫可能失败"
+            exit 1
+          fi
       
       - name: 上传数据库文件
         uses: actions/upload-artifact@v4
         with:
           name: database
           path: book_history.db
-          retention-days: 30  # 保留30天，方便查看历史数据
+          retention-days: 30
+          if-no-files-found: error  # 如果没有文件则失败
       
       - name: 上传日志文件
         uses: actions/upload-artifact@v4
