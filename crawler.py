@@ -96,6 +96,22 @@ def create_database():
         logging.error(f"创建数据库时出错: {str(e)}")
         raise
 
+def check_book_exists(title):
+    """检查书籍是否已存在于数据库中"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM books WHERE title = ?", (title,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        exists = "存在" if result else "不存在"
+        logging.debug(f"检查书籍 '{title}': {exists}")
+        return result is not None
+    except Exception as e:
+        logging.error(f"检查书籍时出错: {str(e)}")
+        return False
+
 def batch_add_books(books):
     """批量添加书籍到数据库，优化重复检查逻辑"""
     if not books:
@@ -545,12 +561,28 @@ def main():
             
             current_books.extend(page_books)
             
-            # 检查并记录新书
+            # 检查并记录新书 - 使用batch_add_books中的逻辑，避免重复问题
             for book in page_books:
                 normalized_title = normalize_title(book["title"])
-                if not check_book_exists(normalized_title):
-                    new_books.append(book)
-                    logging.info(f"🔍 发现新书: {normalized_title} ({publish_month})")
+                
+                # 直接尝试插入，利用SQL的UNIQUE约束
+                try:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO books (title, publish_month, first_seen, last_seen, is_published) 
+                           VALUES (?, ?, ?, ?, 0)""",
+                        (normalized_title, book["publish_month"], book["first_seen"], book["last_seen"])
+                    )
+                    
+                    if cursor.rowcount > 0:
+                        new_books.append(book)
+                        logging.info(f"🔍 发现新书: {normalized_title} ({publish_month})")
+                    
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logging.error(f"❌ 检查新书时出错: '{normalized_title}', 错误: {str(e)}")
         
         # 调试：输出爬取结果
         logging.info(f"📊 爬取完成: {len(current_books)} 本当前书籍, {len(new_books)} 本新书")
