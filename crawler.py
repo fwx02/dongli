@@ -11,9 +11,10 @@ import sqlite3
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
-MIN_INTERVAL_BETWEEN_MESSAGES = 5  # 消息之间的最小间隔（秒）
+MIN_INTERVAL_BETWEEN_MESSAGES = 3  # 消息之间的最小间隔（秒）
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
 MAX_BOOKS_PER_SECTION = 50  # 每个分段最多包含的书籍数量
+MAX_MESSAGE_LENGTH = 3800  # 企业微信消息最大长度（留出296字节安全余量）
 
 def create_database():
     """创建数据库表（如果不存在）"""
@@ -190,6 +191,15 @@ def send_combined_message(title, content):
         }
     }
     
+    # 检查消息长度是否超过限制
+    content_length = len(content.encode('utf-8'))
+    if content_length > MAX_MESSAGE_LENGTH:
+        logging.warning(f"消息长度 {content_length} 超过限制 {MAX_MESSAGE_LENGTH}，将进行截断")
+        # 尝试截断内容（保留开头和结尾的关键信息）
+        truncated_content = content[:MAX_MESSAGE_LENGTH - 200] + "\n\n...（消息过长，已截断）"
+        data["markdown"]["content"] = truncated_content
+        logging.info(f"已将消息截断为 {len(truncated_content.encode('utf-8'))} 字节")
+    
     try:
         # 重试机制
         max_retries = 3
@@ -228,13 +238,9 @@ def send_combined_message(title, content):
 
 def send_wechat_notification(title, content):
     """发送企业微信机器人通知（合并所有内容，考虑API限制）"""
-    # 企业微信Markdown消息最大长度限制（约4000字符）
-    MAX_LENGTH = 3800
-    
-    # 智能分段算法 - 按月份和书籍数量双重控制
+    # 智能分段算法 - 基于字节长度精确控制
     sections = []
     current_section = ""
-    current_books_count = 0
     
     # 按月份分割内容
     month_sections = content.split("\n\n## ")
@@ -245,20 +251,17 @@ def send_wechat_notification(title, content):
         else:
             section_content = "## " + section
             
-            # 计算当前部分的书籍数量
-            books_in_section = section.count("\n### ")
+            # 计算添加新部分后的总长度（使用UTF-8编码计算字节长度）
+            combined_length = len((current_section + "\n\n" + section_content).encode('utf-8'))
             
-            # 如果添加当前部分会超过最大书籍数量，或者总长度超过限制
-            if (current_books_count + books_in_section > MAX_BOOKS_PER_SECTION) or \
-               (len(current_section) + len(section_content) > MAX_LENGTH):
+            # 如果添加当前部分会超过最大长度限制
+            if combined_length > MAX_MESSAGE_LENGTH:
                 # 保存当前部分并开始新的部分
                 sections.append(current_section)
                 current_section = section_content
-                current_books_count = books_in_section
             else:
                 # 继续添加到当前部分
                 current_section += "\n\n" + section_content
-                current_books_count += books_in_section
     
     # 添加最后一个部分
     if current_section:
@@ -271,6 +274,10 @@ def send_wechat_notification(title, content):
             section_title = title
         else:
             section_title = f"{title} (续{i})"
+        
+        # 记录每个分段的长度
+        section_length = len(section.encode('utf-8'))
+        logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，长度 {section_length} 字节")
         
         if not send_combined_message(section_title, section):
             success = False
