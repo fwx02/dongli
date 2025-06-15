@@ -11,10 +11,11 @@ import sqlite3
 WECHAT_WORK_WEBHOOK = os.getenv("WECHAT_WORK_WEBHOOK")
 DB_FILE = "book_history.db"  # 存储历史数据的SQLite数据库文件
 MAX_MESSAGES_PER_DAY = 3  # 每日最多发送的消息数
-MIN_INTERVAL_BETWEEN_MESSAGES = 3  # 消息之间的最小间隔（秒）
+MIN_INTERVAL_BETWEEN_MESSAGES = 60  # 消息之间的最小间隔（秒）
 LAST_MESSAGE_TIME_FILE = "last_message_time.txt"  # 记录上次发送消息的时间
-MAX_MESSAGE_LENGTH = 3600  # 更保守的消息最大长度限制（留出496字节安全余量）
-MAX_BOOKS_PER_SECTION = 20  # 每个分段最多包含的书籍数量（进一步降低）
+MAX_MESSAGE_LENGTH = 3500  # 更保守的消息最大长度限制
+MAX_BOOKS_PER_BATCH = 15  # 每个批次最多包含的书籍数量
+DB_COMMIT_BATCH_SIZE = 10  # 数据库提交批次大小
 
 def create_database():
     """创建数据库表（如果不存在）"""
@@ -35,6 +36,7 @@ def create_database():
         logging.info("数据库初始化完成")
     except Exception as e:
         logging.error(f"创建数据库时出错: {str(e)}")
+        raise  # 向上抛出异常，终止程序执行
 
 def check_book_exists(title):
     """检查书籍是否已存在于数据库中（无论是否已出版）"""
@@ -49,27 +51,44 @@ def check_book_exists(title):
         logging.error(f"检查书籍时出错: {str(e)}")
         return False
 
-def add_book(title, publish_month, first_seen, last_seen):
-    """将新书添加到数据库"""
+def batch_add_books(books):
+    """批量添加书籍到数据库"""
+    if not books:
+        return 0
+    
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO books (title, publish_month, first_seen, last_seen, is_published) 
-               VALUES (?, ?, ?, ?, 0)""",
-            (title, publish_month, first_seen, last_seen)
-        )
-        conn.commit()
+        added_count = 0
+        
+        for i, book in enumerate(books):
+            try:
+                cursor.execute(
+                    """INSERT INTO books (title, publish_month, first_seen, last_seen, is_published) 
+                       VALUES (?, ?, ?, ?, 0)""",
+                    (book["title"], book["publish_month"], book["first_seen"], book["last_seen"], 0)
+                )
+                added_count += 1
+                
+                # 每批提交一次，避免长时间事务
+                if (i + 1) % DB_COMMIT_BATCH_SIZE == 0:
+                    conn.commit()
+                    logging.debug(f"已批量提交 {i+1} 条记录到数据库")
+            except sqlite3.IntegrityError:
+                # 书籍已存在，更新last_seen（仅当书籍未被标记为已出版时）
+                update_book_last_seen(book["title"], book["last_seen"])
+            except Exception as e:
+                logging.error(f"添加书籍 {book['title']} 时出错: {str(e)}")
+        
+        conn.commit()  # 提交剩余的记录
         conn.close()
-        logging.info(f"新书已添加到数据库: {title}")
-        return True
-    except sqlite3.IntegrityError:
-        # 书籍已存在，更新last_seen（仅当书籍未被标记为已出版时）
-        update_book_last_seen(title, last_seen)
-        return False
+        logging.info(f"成功添加 {added_count} 本新书到数据库，共处理 {len(books)} 本书籍")
+        return added_count
     except Exception as e:
-        logging.error(f"添加书籍时出错: {str(e)}")
-        return False
+        logging.error(f"批量添加书籍时出错: {str(e)}")
+        conn.rollback()  # 回滚事务
+        conn.close()
+        return 0
 
 def update_book_last_seen(title, last_seen):
     """更新书籍的最后一次出现时间（仅当书籍未被标记为已出版时）"""
@@ -79,7 +98,7 @@ def update_book_last_seen(title, last_seen):
         # 只更新未出版的书籍
         cursor.execute(
             "UPDATE books SET last_seen = ? WHERE title = ? AND is_published = 0",
-            (last_seen, title)
+            (last_seen, last_seen, title)
         )
         conn.commit()
         conn.close()
@@ -197,62 +216,75 @@ def send_combined_message(title, content):
     if json_length > 4096:
         logging.warning(f"完整JSON请求长度 {json_length} 超过企业微信限制 4096 字节")
         
-        # 估算内容部分可以容纳的长度
-        estimated_content_length = 4096 - (json_length - len(content.encode('utf-8'))) - 100
-        if estimated_content_length < 1000:  # 设置一个合理的最小值
-            estimated_content_length = 1000
+        # 尝试智能分段
+        sections = split_message_smart(content)
+        success = True
         
-        logging.info(f"估算内容最大长度为 {estimated_content_length} 字节")
-        
-        # 截断内容并添加提示
-        truncated_content = content.encode('utf-8')[:estimated_content_length].decode('utf-8', 'ignore')
-        truncated_content = truncated_content.rsplit('\n', 1)[0]  # 确保在完整的一行结束
-        truncated_content += "\n\n...（内容过长，已自动截断）"
-        
-        # 重新构建并检查
-        data["markdown"]["content"] = truncated_content
-        json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
-        logging.info(f"截断后JSON请求长度为 {len(json_data)} 字节")
-    
-    try:
-        # 重试机制
-        max_retries = 3
-        for attempt in range(max_retries):
+        for i, section in enumerate(sections):
+            section_title = f"{title} (分段{i+1}/{len(sections)})"
+            
+            # 重新计算分段后的JSON长度
+            section_data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": section
+                }
+            }
+            section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
+            
+            logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，长度 {section_length} 字节")
+            
+            if section_length > 4096:
+                logging.error(f"分段 {i+1} 长度 {section_length} 仍然超过限制，尝试截断")
+                section = truncate_message(section)
+                section_data["markdown"]["content"] = section
+                section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
+                logging.info(f"截断后分段 {i+1} 长度为 {section_length} 字节")
+            
             try:
                 response = requests.post(WECHAT_WORK_WEBHOOK, headers={'Content-Type': 'application/json'}, 
-                                        data=json_data, timeout=15)
+                                        data=json.dumps(section_data, ensure_ascii=False), timeout=15)
                 response.raise_for_status()
                 
                 result = response.json()
                 if result.get("errcode") == 0:
-                    logging.info(f"企业微信通知发送成功: {title}，长度 {len(json_data)} 字节")
-                    save_last_message_time()  # 保存发送时间
-                    return True
+                    logging.info(f"分段 {i+1} 发送成功")
                 else:
-                    logging.error(f"企业微信API返回错误: {result}")
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt  # 指数退避
-                        logging.info(f"尝试重试 ({attempt+1}/{max_retries})，等待 {wait_time} 秒")
-                        time.sleep(wait_time)
-                    else:
-                        return False
-            except requests.exceptions.RequestException as e:
-                logging.error(f"发送请求时出错: {str(e)}")
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # 指数退避
-                    logging.info(f"尝试重试 ({attempt+1}/{max_retries})，等待 {wait_time} 秒")
-                    time.sleep(wait_time)
-                else:
-                    return False
+                    logging.error(f"分段 {i+1} 发送失败: {result}")
+                    success = False
+            except Exception as e:
+                logging.error(f"发送分段 {i+1} 时出错: {str(e)}")
+                success = False
+        
+        if success:
+            logging.info(f"消息已成功分段发送，共 {len(sections)} 段")
+            save_last_message_time()
+            return True
+        else:
+            logging.error("消息分段发送失败")
+            return False
+    else:
+        logging.info(f"消息长度 {json_length} 字节，在限制范围内")
+        try:
+            response = requests.post(WECHAT_WORK_WEBHOOK, headers={'Content-Type': 'application/json'}, 
+                                    data=json_data, timeout=15)
+            response.raise_for_status()
             
-        return False
-    except Exception as e:
-        logging.error(f"发送企业微信通知时出错: {str(e)}")
-        return False
+            result = response.json()
+            if result.get("errcode") == 0:
+                logging.info(f"企业微信通知发送成功: {title}，长度 {json_length} 字节")
+                save_last_message_time()  # 保存发送时间
+                return True
+            else:
+                logging.error(f"企业微信API返回错误: {result}")
+                return False
+        except Exception as e:
+            logging.error(f"发送企业微信通知时出错: {str(e)}")
+            return False
 
-def send_wechat_notification(title, content):
-    """发送企业微信机器人通知（合并所有内容，考虑API限制）"""
-    # 智能分段算法 - 基于JSON序列化后的实际长度控制
+def split_message_smart(content):
+    """智能分割长消息，确保每段都在限制范围内"""
+    # 按月份和书籍数量双重控制
     sections = []
     current_section = ""
     
@@ -265,7 +297,7 @@ def send_wechat_notification(title, content):
         else:
             section_content = "## " + section
             
-            # 计算添加新部分后的完整JSON长度
+            # 尝试添加新部分并检查长度
             test_data = {
                 "msgtype": "markdown",
                 "markdown": {
@@ -287,15 +319,9 @@ def send_wechat_notification(title, content):
     if current_section:
         sections.append(current_section)
     
-    # 发送所有部分
-    success = True
-    for i, section in enumerate(sections):
-        if i == 0:
-            section_title = title
-        else:
-            section_title = f"{title} (续{i})"
-        
-        # 记录每个分段的JSON长度
+    # 检查每个部分是否都符合要求，如有必要进一步分割
+    final_sections = []
+    for section in sections:
         section_data = {
             "msgtype": "markdown",
             "markdown": {
@@ -303,12 +329,63 @@ def send_wechat_notification(title, content):
             }
         }
         section_length = len(json.dumps(section_data, ensure_ascii=False).encode('utf-8'))
-        logging.info(f"发送分段 {i+1}/{len(sections)}: {section_title}，JSON长度 {section_length} 字节")
         
-        if not send_combined_message(section_title, section):
-            success = False
+        if section_length <= 4096:
+            final_sections.append(section)
+        else:
+            logging.warning(f"部分内容长度 {section_length} 超过限制，需要进一步分割")
+            # 尝试按书籍列表分割
+            books = section.split("\n### ")
+            current_batch = []
+            current_batch_length = 0
+            
+            for book in books:
+                book_data = {
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "content": "\n### ".join(current_batch + [book])
+                    }
+                }
+                batch_length = len(json.dumps(book_data, ensure_ascii=False).encode('utf-8'))
+                
+                if batch_length > 4096 and current_batch:
+                    final_sections.append("\n### ".join(current_batch))
+                    current_batch = [book]
+                else:
+                    current_batch.append(book)
+            
+            if current_batch:
+                final_sections.append("\n### ".join(current_batch))
     
-    return success
+    return final_sections
+
+def truncate_message(content):
+    """截断消息内容，确保在限制范围内"""
+    # 估算内容部分可以容纳的长度
+    estimated_content_length = 3800  # 留出296字节的安全余量
+    
+    # 按字节截断，确保不破坏UTF-8字符
+    truncated_bytes = content.encode('utf-8')[:estimated_content_length]
+    
+    # 尝试解码，如果截断在多字节字符中间，可能会失败
+    try:
+        truncated_content = truncated_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        # 寻找最近的完整字符边界
+        for i in range(len(truncated_bytes) - 1, -1, -1):
+            try:
+                truncated_content = truncated_bytes[:i].decode('utf-8')
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            truncated_content = ""
+    
+    # 确保在完整的一行结束
+    truncated_content = truncated_content.rsplit('\n', 1)[0]
+    truncated_content += "\n\n...（内容过长，已自动截断）"
+    
+    return truncated_content
 
 def get_book_titles(page_num):
     """获取指定页的书籍标题和出版时间"""
@@ -387,27 +464,41 @@ def main():
             logging.info(f"第{page}页获取到{len(titles)}本书籍标题 ({publish_month})")
             
             # 记录所有书籍
+            page_books = []
             for title in titles:
                 book_info = {
                     "title": title,
-                    "publish_month": publish_month
+                    "publish_month": publish_month,
+                    "first_seen": today,
+                    "last_seen": today
                 }
-                current_books.append(book_info)
+                page_books.append(book_info)
+            
+            # 批量处理书籍数据
+            current_books.extend(page_books)
+            
+            # 检查并记录新书（分批处理）
+            batch_size = MAX_BOOKS_PER_BATCH
+            for i in range(0, len(page_books), batch_size):
+                batch = page_books[i:i+batch_size]
+                new_batch = []
                 
-                # 检查书籍是否已存在（无论是否已出版）
-                if not check_book_exists(title):
-                    # 新书：添加到数据库并记录
-                    if add_book(title, publish_month, today, today):
-                        new_books.append({
-                            "title": title,
-                            "publish_month": publish_month,
-                            "first_seen": today
-                        })
-                        logging.info(f"发现新书: {title} (出版月份: {publish_month})")
-                else:
-                    # 已存在的书籍：更新last_seen
-                    update_book_last_seen(title, today)
-                    logging.info(f"已存在的书籍: {title}")
+                for book in batch:
+                    if not check_book_exists(book["title"]):
+                        new_batch.append(book)
+                        logging.info(f"发现新书: {book['title']} (出版月份: {publish_month})")
+                
+                if new_batch:
+                    new_books.extend(new_batch)
+            
+            logging.info(f"第{page}页处理完成，发现 {len(new_batch)} 本新书")
+        
+        # 批量添加新书到数据库
+        if new_books:
+            added_count = batch_add_books(new_books)
+            logging.info(f"共添加 {added_count} 本新书到数据库")
+        else:
+            logging.info("没有发现新书")
         
         # 生成月份范围
         month_range = "、".join(sorted(publish_months)) if publish_months else "未知月份"
