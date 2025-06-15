@@ -35,8 +35,8 @@ jobs:
         with:
           name: database
           path: .
-        continue-on-error: true
-      
+        continue-on-error: true  # 允许下载失败
+        
       - name: 检查数据库文件状态
         id: check-db
         run: |
